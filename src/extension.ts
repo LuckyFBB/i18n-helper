@@ -2,26 +2,31 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 
+import { getLocaleValue, loadLocales } from './utils';
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
-    // Use the console to output diagnostic information (console.log) and errors (console.error)
-    // This line of code will only be executed once when your extension is activated
-    console.log('Congratulations, your extension "test" is now active!');
-
-    // The command has been defined in the package.json file
-    // Now provide the implementation of the command with registerCommand
-    // The commandId parameter must match the command field in package.json
-    const disposable = vscode.commands.registerCommand(
-        'test.helloWorld',
-        () => {
-            // The code you place here will be executed every time your command is executed
-            // Display a message box to the user
-            vscode.window.showInformationMessage('Hello World from test!');
+    loadLocales();
+    const provider = vscode.languages.registerHoverProvider(
+        ['typescript', 'javascript', 'typescriptreact', 'javascriptreact'],
+        {
+            provideHover(document, position, token) {
+                const range = document.getWordRangeAtPosition(
+                    position,
+                    /I18N(?:\.[a-zA-Z0-9_$]+)+/,
+                );
+                if (!range) return;
+                const word = document.getText(range);
+                const translation = getLocaleValue(word.replace('I18N.', ''));
+                if (translation) {
+                    return new vscode.Hover(translation);
+                }
+            },
         },
     );
 
-    context.subscriptions.push(disposable);
+    context.subscriptions.push(provider);
 }
 
 // This method is called when your extension is deactivated
