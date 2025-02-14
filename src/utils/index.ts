@@ -8,11 +8,26 @@ const lodash = require('lodash-es');
 
 let locales: Record<string, any> = {};
 
+// i18n.config.json 默认值
+const DEFAULT_CONFIG = {
+    localeDir: 'locales',
+    extractDir: './',
+    importStatement: 'import I18N from @/utils/i18n',
+    excludeFile: [],
+    excludeDir: ['node_modules'],
+    type: 'ts',
+};
+
+type IConfig = typeof DEFAULT_CONFIG;
+
 /**
  * @param directoryPath 文件夹路径
  * @returns 文件夹下的文件夹数组
  */
-const getSubdirectories = (directoryPath: string): string[] => {
+const getSubdirectories = async (directoryPath: string): Promise<string[]> => {
+    if (!fs.existsSync(directoryPath)) {
+        return Promise.reject(`尚未找到 locales 文件`);
+    }
     return fs
         .readdirSync(directoryPath)
         .filter((name) =>
@@ -20,23 +35,48 @@ const getSubdirectories = (directoryPath: string): string[] => {
         );
 };
 
+const getProjectConfig = async (): Promise<IConfig> => {
+    const configFile = path.join(
+        `${vscode.workspace.rootPath}/i18n.config.json`,
+    );
+    if (!fs.existsSync(configFile)) {
+        return Promise.reject('当前项目尚未配置 i18n.config.json');
+    }
+    return Promise.resolve({
+        ...DEFAULT_CONFIG,
+        ...JSON.parse(fs.readFileSync(configFile, 'utf-8')),
+    });
+};
+
 /**
  * @description 读取文件夹下的语言文件
  */
-export const loadLocales = () => {
-    const localeDir = path.join(
-        `${vscode.workspace.rootPath}/apps/batch/src/locales`,
-    );
-    getSubdirectories(localeDir).forEach((lang) => {
-        const filePath = path.join(localeDir, `${lang}/index.ts`);
-        getExportedObject(filePath)
-            .then((res) => {
-                locales[lang] = res;
-            })
-            .catch((error) => {
-                console.log(error);
-            });
-    });
+export const loadLocales = async () => {
+    try {
+        const config = await getProjectConfig();
+        const localeDir = path.join(
+            vscode.workspace.rootPath || '',
+            config.localeDir,
+        );
+        const subDirs = await getSubdirectories(localeDir);
+        const results = await Promise.all(
+            subDirs.map((lang) => {
+                const filePath = path.join(
+                    localeDir,
+                    `${lang}/index.${config.type}`,
+                );
+                return getExportedObject(filePath).then((res) => ({
+                    lang,
+                    res,
+                }));
+            }),
+        );
+        results.forEach(({ lang, res }) => {
+            locales[lang] = res;
+        });
+    } catch (error) {
+        vscode.window.showErrorMessage(error as string);
+    }
 };
 
 /**
@@ -69,7 +109,7 @@ const getExportedObject = (filePath: string) => {
     });
 
     if (!exportIdentifier && !Object.keys(exportData).length) {
-        return Promise.reject('❌ 没有找到 export default 的 Identifier');
+        return Promise.reject(`解析${filePath}文件失败`);
     }
 
     traverse(ast, {
@@ -106,7 +146,7 @@ export const getLocaleValue = (path: string): string | undefined => {
     if (Object.keys(data).length) {
         let text = '';
         Object.entries(data).forEach(([key, value]) => {
-            text += `${key}: ${value}\n\n`;
+            text += value ? `${key}: ${value}\n\n` : '';
         });
         return text;
     } else {

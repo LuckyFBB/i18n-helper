@@ -16,7 +16,9 @@ export function activate(context: vscode.ExtensionContext) {
                     position,
                     /I18N(?:\.[a-zA-Z0-9_$]+)+/,
                 );
-                if (!range) return;
+                if (!range) {
+                    return;
+                }
                 const word = document.getText(range);
                 const translation = getLocaleValue(word.replace('I18N.', ''));
                 if (translation) {
