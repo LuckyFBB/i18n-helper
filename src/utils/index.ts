@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parse } from '@babel/parser';
 import traverse from '@babel/traverse';
-import { isIdentifier, isObjectExpression } from '@babel/types';
+import * as babelTypes from '@babel/types';
 const lodash = require('lodash-es');
 
 let locales: Record<string, any> = {};
@@ -97,10 +97,10 @@ const getExportedObject = (filePath: string) => {
     traverse(ast, {
         ExportDefaultDeclaration(path) {
             const declaration = path.node.declaration;
-            if (isIdentifier(declaration)) {
+            if (babelTypes.isIdentifier(declaration)) {
                 exportIdentifier = declaration.name;
             }
-            if (isObjectExpression(declaration)) {
+            if (babelTypes.isObjectExpression(declaration)) {
                 exportData = eval(
                     `(${code.slice(declaration.start ?? 0, declaration.end ?? 0)})`,
                 );
@@ -152,4 +152,81 @@ export const getLocaleValue = (path: string): string | undefined => {
     } else {
         return undefined;
     }
+};
+
+export const containsChinese = (value: string) =>
+    value.match(/[\u4E00-\u9FFF]/g);
+
+export const getChineseRange = (fileContent: string) => {
+    const ranges: vscode.Range[] = [];
+    const ast = parse(fileContent, {
+        sourceType: 'module',
+        plugins: ['decorators-legacy', 'typescript', 'jsx'],
+    });
+
+    traverse(ast, {
+        StringLiteral(path) {
+            if (containsChinese(path.node.value)) {
+                const start = path.node.loc?.start;
+                const end = path.node.loc?.end;
+                if (start && end) {
+                    ranges.push(
+                        new vscode.Range(
+                            new vscode.Position(start.line - 1, start.column),
+                            new vscode.Position(end.line - 1, end.column),
+                        ),
+                    );
+                }
+            }
+        },
+        // TODO:
+        JSXElement(path) {
+            path.node.children.forEach((child) => {
+                if (babelTypes.isJSXText(child)) {
+                    const text = child.value.trim();
+                    if (text && containsChinese(text)) {
+                        const start = child.loc?.start;
+                        const end = child.loc?.end;
+                        if (start && end) {
+                            const startOffset = child.value.indexOf(text);
+                            ranges.push(
+                                new vscode.Range(
+                                    new vscode.Position(
+                                        start.line - 1,
+                                        start.column + startOffset,
+                                    ),
+                                    new vscode.Position(
+                                        end.line - 1,
+                                        start.column +
+                                            startOffset +
+                                            text.length,
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                }
+            });
+        },
+        JSXAttribute(path) {
+            const { value } = path.node;
+            if (
+                babelTypes.isStringLiteral(value) &&
+                containsChinese(value.value)
+            ) {
+                const start = value.loc?.start;
+                const end = value.loc?.end;
+                if (start && end) {
+                    ranges.push(
+                        new vscode.Range(
+                            new vscode.Position(start.line - 1, start.column),
+                            new vscode.Position(end.line - 1, end.column),
+                        ),
+                    );
+                }
+            }
+        },
+    });
+
+    return ranges;
 };
