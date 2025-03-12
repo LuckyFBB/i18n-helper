@@ -3,7 +3,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parse } from '@babel/parser';
 import traverse from '@babel/traverse';
-import { isIdentifier, isObjectExpression } from '@babel/types';
+import * as babelTypes from '@babel/types';
+import generate from '@babel/generator';
+import slash from 'slash2';
+
 const lodash = require('lodash-es');
 
 let locales: Record<string, any> = {};
@@ -16,9 +19,23 @@ const DEFAULT_CONFIG = {
     excludeFile: [],
     excludeDir: ['node_modules'],
     type: 'ts',
+    sourceLocale: 'zh-CN',
 };
 
 type IConfig = typeof DEFAULT_CONFIG;
+
+export type IDiagnosticRange = {
+    range: vscode.Range;
+    type: Type[];
+    text: string;
+};
+
+export enum Type {
+    String = 'string',
+    Template = 'template',
+    Jsx = 'jsx',
+    JsxAttribute = 'jsxAttribute',
+}
 
 /**
  * @param directoryPath 文件夹路径
@@ -35,48 +52,45 @@ const getSubdirectories = async (directoryPath: string): Promise<string[]> => {
         );
 };
 
-const getProjectConfig = async (): Promise<IConfig> => {
+export const getProjectConfig = (): IConfig => {
     const configFile = path.join(
         `${vscode.workspace.rootPath}/i18n.config.json`,
     );
     if (!fs.existsSync(configFile)) {
-        return Promise.reject('当前项目尚未配置 i18n.config.json');
+        throw new Error('当前项目尚未配置 i18n.config.json');
     }
-    return Promise.resolve({
+    return {
         ...DEFAULT_CONFIG,
         ...JSON.parse(fs.readFileSync(configFile, 'utf-8')),
-    });
+    };
 };
 
 /**
  * @description 读取文件夹下的语言文件
  */
 export const loadLocales = async () => {
-    try {
-        const config = await getProjectConfig();
-        const localeDir = path.join(
-            vscode.workspace.rootPath || '',
-            config.localeDir,
-        );
-        const subDirs = await getSubdirectories(localeDir);
-        const results = await Promise.all(
-            subDirs.map((lang) => {
-                const filePath = path.join(
-                    localeDir,
-                    `${lang}/index.${config.type}`,
-                );
-                return getExportedObject(filePath).then((res) => ({
-                    lang,
-                    res,
-                }));
-            }),
-        );
-        results.forEach(({ lang, res }) => {
-            locales[lang] = res;
-        });
-    } catch (error) {
-        vscode.window.showErrorMessage(error as string);
-    }
+    const config = getProjectConfig();
+    const localeDir = path.join(
+        vscode.workspace.rootPath || '',
+        config.localeDir,
+    );
+    const subDirs = await getSubdirectories(localeDir);
+    const results = await Promise.all(
+        subDirs.map((lang) => {
+            const filePath = path.join(
+                localeDir,
+                `${lang}/index.${config.type}`,
+            );
+            return getExportedObject(filePath).then((res) => ({
+                lang,
+                res,
+            }));
+        }),
+    );
+    results.forEach(({ lang, res }) => {
+        locales[lang] = res;
+    });
+    return locales;
 };
 
 /**
@@ -97,10 +111,10 @@ const getExportedObject = (filePath: string) => {
     traverse(ast, {
         ExportDefaultDeclaration(path) {
             const declaration = path.node.declaration;
-            if (isIdentifier(declaration)) {
+            if (babelTypes.isIdentifier(declaration)) {
                 exportIdentifier = declaration.name;
             }
-            if (isObjectExpression(declaration)) {
+            if (babelTypes.isObjectExpression(declaration)) {
                 exportData = eval(
                     `(${code.slice(declaration.start ?? 0, declaration.end ?? 0)})`,
                 );
@@ -153,3 +167,290 @@ export const getLocaleValue = (path: string): string | undefined => {
         return undefined;
     }
 };
+
+export const generateLocaleKey = (filePath: string) => {
+    const projectConfig = getProjectConfig();
+
+    const basePath = path.resolve(
+        vscode.workspace.rootPath || '',
+        projectConfig.extractDir,
+    );
+
+    const relativePath = path.relative(basePath, filePath);
+
+    const names = slash(relativePath).split('/');
+    const fileName = lodash.last(names) as any;
+    let fileKey = fileName.split('.').slice(0, -1).join('.');
+    const dir = names.slice(0, -1).join('.');
+    if (dir) {
+        fileKey = names.slice(0, -1).concat(fileKey).join('.');
+    }
+    return fileKey.replace(/-/g, '_');
+};
+
+/**
+ * 返回类似 excel 头部的标识
+ * @param n number
+ * @returns string
+ */
+export const getSortKey = (n: number, extractMap = {}): string => {
+    let label = '';
+    let num = n;
+    while (num > 0) {
+        num--;
+        label = String.fromCharCode((num % 26) + 65) + label;
+        num = Math.floor(num / 26);
+    }
+    const key = `${label}`;
+    if (lodash.get(extractMap, key)) {
+        return getSortKey(n + 1, extractMap);
+    }
+    return key;
+};
+
+export const containsChinese = (value: string) =>
+    value.match(/[\u4E00-\u9FFF]/g);
+
+export const getChineseRange = (fileContent: string) => {
+    const diagnosticRanges: IDiagnosticRange[] = [];
+    const ast = parse(fileContent, {
+        sourceType: 'module',
+        plugins: ['decorators-legacy', 'typescript', 'jsx'],
+    });
+
+    traverse(ast, {
+        StringLiteral(path) {
+            if (containsChinese(path.node.value)) {
+                const start = path.node.loc?.start;
+                const end = path.node.loc?.end;
+                if (start && end) {
+                    diagnosticRanges.push({
+                        range: new vscode.Range(
+                            new vscode.Position(start.line - 1, start.column),
+                            new vscode.Position(end.line - 1, end.column),
+                        ),
+                        type: [Type.String],
+                        text: path.node.value,
+                    });
+                }
+            }
+        },
+        TemplateLiteral(path) {
+            const { node } = path;
+            const { start, end } = node;
+            if (!start || !end) {
+                return;
+            }
+            let templateContent = fileContent.slice(start + 1, end - 1);
+            const isTemplate = !!node.expressions.length;
+
+            if (containsChinese(templateContent)) {
+                const start = path.node.loc?.start;
+                const end = path.node.loc?.end;
+                if (start && end) {
+                    diagnosticRanges.push({
+                        range: new vscode.Range(
+                            new vscode.Position(start.line - 1, start.column),
+                            new vscode.Position(end.line - 1, end.column),
+                        ),
+                        type: [isTemplate ? Type.Template : Type.String],
+                        text: templateContent,
+                    });
+                }
+            }
+        },
+        JSXText(path) {
+            const { value, loc } = path.node;
+            const text = value.trim();
+            if (containsChinese(text)) {
+                const start = loc?.start;
+                const end = loc?.end;
+                const endWithBreak = /\n\s*$/.test(value);
+                if (start && end) {
+                    const startOffset = value.indexOf(text);
+                    diagnosticRanges.push({
+                        range: new vscode.Range(
+                            new vscode.Position(
+                                start.line - 1,
+                                start.column + startOffset,
+                            ),
+                            new vscode.Position(
+                                end.line - (endWithBreak ? 2 : 1),
+                                start.column + startOffset + text.length,
+                            ),
+                        ),
+                        type: [Type.Jsx],
+                        text,
+                    });
+                }
+            }
+        },
+        JSXAttribute(path) {
+            const { value: childNode } = path.node;
+            if (
+                babelTypes.isStringLiteral(childNode) &&
+                containsChinese(childNode.value)
+            ) {
+                const start = childNode.loc?.start;
+                const end = childNode.loc?.end;
+                if (start && end) {
+                    diagnosticRanges.push({
+                        range: new vscode.Range(
+                            new vscode.Position(start.line - 1, start.column),
+                            new vscode.Position(end.line - 1, end.column),
+                        ),
+                        type: [Type.JsxAttribute, Type.String],
+                        text: childNode.value,
+                    });
+                }
+            }
+            if (babelTypes.isJSXExpressionContainer(childNode)) {
+                const expression = childNode.expression;
+                if (babelTypes.isTemplateLiteral(expression)) {
+                    const { start, end } = expression;
+                    if (!start || !end) {
+                        return;
+                    }
+                    const isTemplate = !!expression.expressions.length;
+                    let templateContent = fileContent.slice(start + 1, end - 1);
+                    if (containsChinese(templateContent)) {
+                        const start = childNode.loc?.start;
+                        const end = childNode.loc?.end;
+                        if (start && end) {
+                            diagnosticRanges.push({
+                                range: new vscode.Range(
+                                    new vscode.Position(
+                                        start.line - 1,
+                                        start.column,
+                                    ),
+                                    new vscode.Position(
+                                        end.line - 1,
+                                        end.column,
+                                    ),
+                                ),
+                                type: [
+                                    Type.JsxAttribute,
+                                    isTemplate ? Type.Template : Type.String,
+                                ],
+                                text: templateContent,
+                            });
+                        }
+                    }
+                }
+            }
+        },
+    });
+
+    return diagnosticRanges;
+};
+
+export const objectToAst = (
+    obj: Record<string, any> | string,
+): babelTypes.ObjectExpression => {
+    const data = typeof obj === 'string' ? JSON.parse(obj) : obj;
+    const properties = Object.entries(data).map(([key, value]) => {
+        let valueNode: babelTypes.Expression;
+        if (value && typeof value === 'object') {
+            valueNode = objectToAst(value);
+        } else if (typeof value === 'string') {
+            valueNode = babelTypes.stringLiteral(value);
+        } else {
+            valueNode = babelTypes.valueToNode(value);
+        }
+        return babelTypes.objectProperty(
+            babelTypes.stringLiteral(key),
+            valueNode,
+        );
+    });
+
+    return babelTypes.objectExpression(properties);
+};
+
+/**
+ * 创建或更新国际化资源文件
+ * @param {string} content - 要写入的国际化内容
+ */
+export const updateLocaleContent = (
+    content: Record<string, any>,
+    filePath?: string,
+) => {
+    const { localeDir, type, sourceLocale } = getProjectConfig();
+    const targetFilename =
+        filePath ||
+        path.join(
+            vscode.workspace.rootPath || '',
+            localeDir,
+            `${sourceLocale}/index.${type}`,
+        );
+    const directory = path.dirname(targetFilename);
+
+    if (!fs.existsSync(directory)) {
+        fs.mkdirSync(directory, { recursive: true });
+    }
+
+    if (['ts', 'js'].includes(type)) {
+        const newAst = objectToAst(content);
+
+        const sourceCode = fs.readFileSync(targetFilename, 'utf-8');
+        const ast = parse(sourceCode, {
+            sourceType: 'module',
+            plugins: type === 'ts' ? ['typescript'] : [],
+        });
+
+        let exportedIdentifier: string | null = null;
+
+        traverse(ast, {
+            ExportDefaultDeclaration(path) {
+                const declaration = path.node.declaration;
+                if (babelTypes.isIdentifier(declaration)) {
+                    exportedIdentifier = declaration.name;
+                }
+                if (babelTypes.isObjectExpression(declaration)) {
+                    path.node.declaration = newAst;
+                }
+                path.stop();
+            },
+        });
+
+        if (exportedIdentifier) {
+            traverse(ast, {
+                VariableDeclarator(path) {
+                    if (
+                        babelTypes.isIdentifier(path.node.id) &&
+                        path.node.id.name === exportedIdentifier
+                    ) {
+                        path.node.init = newAst;
+                        path.stop();
+                    }
+                },
+            });
+        }
+
+        const { code } = generate(ast, {
+            jsescOption: {
+                minimal: true,
+            },
+        });
+        fs.writeFileSync(targetFilename, code, 'utf8');
+        return;
+    }
+
+    fs.writeFileSync(targetFilename, JSON.stringify(content, null, 4), 'utf8');
+};
+
+export function replaceTemplateExpressions(template: string): {
+    result: string;
+    mapping: Record<string, string>;
+} {
+    let count = 1;
+    const mapping: Record<string, string> = {};
+
+    const result = template.replace(/\$\{([^}]+)\}/g, (_, varName) => {
+        const newVar = `val${count}`;
+        mapping[newVar] = varName;
+        count++;
+        return `{${newVar}}`;
+    });
+
+    return { result, mapping };
+}
