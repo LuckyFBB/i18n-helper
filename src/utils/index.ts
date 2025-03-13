@@ -320,6 +320,7 @@ export const getChineseRange = (fileContent: string) => {
                         type: [Type.JsxAttribute, Type.String],
                         text: childNode.value,
                     });
+                    path.skip();
                 }
             }
             if (babelTypes.isJSXExpressionContainer(childNode)) {
@@ -354,6 +355,7 @@ export const getChineseRange = (fileContent: string) => {
                             });
                         }
                     }
+                    path.skip();
                 }
             }
         },
