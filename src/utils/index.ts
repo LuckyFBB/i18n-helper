@@ -211,6 +211,20 @@ export const getSortKey = (n: number, extractMap = {}): string => {
 export const containsChinese = (value: string) =>
     value.match(/[\u4E00-\u9FFF]/g);
 
+function countNewlinesAndIndentation(str: string) {
+    const newlinesMatch = str.match(/^(\n+)/); // 计算前导换行符
+    const indentationMatch = str.match(/\s*\n(\s*)\S/); // 计算第一个换行后缩进
+
+    const offsetLines = newlinesMatch ? newlinesMatch[1].length : 0;
+    const indentation =
+        indentationMatch && offsetLines ? indentationMatch[1].length : 0;
+
+    return {
+        offsetLines,
+        indentation,
+    };
+}
+
 export const getChineseRange = (fileContent: string) => {
     const diagnosticRanges: IDiagnosticRange[] = [];
     const ast = parse(fileContent, {
@@ -262,21 +276,25 @@ export const getChineseRange = (fileContent: string) => {
         JSXText(path) {
             const { value, loc } = path.node;
             const text = value.trim();
+            const { offsetLines, indentation } =
+                countNewlinesAndIndentation(value);
             if (containsChinese(text)) {
                 const start = loc?.start;
                 const end = loc?.end;
                 const endWithBreak = /\n\s*$/.test(value);
+                const startWithBreak = /^\s*\n/.test(value);
                 if (start && end) {
-                    const startOffset = value.indexOf(text);
                     diagnosticRanges.push({
                         range: new vscode.Range(
                             new vscode.Position(
-                                start.line - 1,
-                                start.column + startOffset,
+                                start.line - 1 + offsetLines,
+                                startWithBreak
+                                    ? indentation
+                                    : start.column + indentation,
                             ),
                             new vscode.Position(
                                 end.line - (endWithBreak ? 2 : 1),
-                                start.column + startOffset + text.length,
+                                start.column + indentation + text.length,
                             ),
                         ),
                         type: [Type.Jsx],
@@ -302,6 +320,7 @@ export const getChineseRange = (fileContent: string) => {
                         type: [Type.JsxAttribute, Type.String],
                         text: childNode.value,
                     });
+                    path.skip();
                 }
             }
             if (babelTypes.isJSXExpressionContainer(childNode)) {
@@ -336,6 +355,7 @@ export const getChineseRange = (fileContent: string) => {
                             });
                         }
                     }
+                    path.skip();
                 }
             }
         },
